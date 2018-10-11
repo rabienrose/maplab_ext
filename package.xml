@@ -17,5 +17,10 @@
   <depend>aslam_cv_cameras</depend>
   <depend>aslam_cv_common</depend>
   <depend>aslam_cv_frames</depend>
+  <depend>aslam_cv_matcher</depend>
+  <depend>aslam_cv_tracker</depend>
+  <depend>aslam_cv_triangulation</depend>
   <depend>aslam_cv_pipeline</depend>
+  <depend>feature_tracking</depend>
+  <depend>rosbag</depend>
 </package>
