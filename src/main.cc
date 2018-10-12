@@ -83,6 +83,19 @@ std::vector<std::string> split(const std::string& str, const std::string& delim)
     return tokens;
 }
 
+int findTrack(aslam::FeatureTracks& tracks, aslam::FrameId id, int index){
+    for (int i=0; i<tracks.size(); i++){
+        aslam::FeatureTrack& track_t=tracks[i];
+        for (int j=0; j<track_t.getKeypointIdentifiers().size(); j++){
+            aslam::KeypointIdentifier& kp = track_t.getKeypointIdentifiers()[j];
+            if (kp.getFrame().getId()==id && kp.getKeypointIndex() ==index ){
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
 int main(int argc, char** argv){
     google::InitGoogleLogging(argv[0]);
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -90,7 +103,7 @@ int main(int argc, char** argv){
     FLAGS_alsologtostderr = true;
     FLAGS_colorlogtostderr = true;
     
-    visualization::RVizVisualizationSink::init();
+    visualization::RVizVisualizationSink::init(); 
     
     if (FLAGS_images_folder.empty()) {
         return -1;
@@ -158,7 +171,7 @@ int main(int argc, char** argv){
         frame_list.push_back(frame);
         pose_list.push_back(pose);
         count_input++;
-        if (count_input>400){
+        if (count_input>40){
             break;
         }
     }
@@ -170,52 +183,97 @@ int main(int argc, char** argv){
     int hamming_distance_threshold_=60;
     
     
-    std::vector<aslam::MatchingProblemFrameToFrame::MatchesWithScore> match_list;
-    for (int i=1;i<frame_list.size();i++){
-        apple_frame_=frame_list[i-1];
-        banana_frame_=frame_list[i];
-        Eigen::Matrix4d apple_pose=pose_list[i-1];
-        Eigen::Matrix4d banana_pose=pose_list[i];
-        Eigen::Matrix4d pose_A_B=apple_pose*banana_pose.inverse();
-        Eigen::Matrix4d pose_B_A=pose_A_B.inverse();
-        
-        Eigen::Quaterniond q_e_B_A(pose_B_A.block<3,3>(0,0));
-        aslam::Quaternion q_B_A(q_e_B_A);
-        //std::cout<<q_e_A_B.x()<<","<<q_e_A_B.y()<<","<<q_e_A_B.z()<<","<<q_e_A_B.w()<<std::endl;
-        aslam::MatchingProblemFrameToFrame::Ptr matching_problem =
-            aligned_shared<aslam::MatchingProblemFrameToFrame>(
-            *apple_frame_, *banana_frame_, q_B_A, image_space_distance_threshold_,
-            hamming_distance_threshold_);
-        aslam::MatchingProblemFrameToFrame::MatchesWithScore matches_A_B;
-        matching_engine_.match(matching_problem.get(), &matches_A_B);
-        aslam::FrameToFrameMatches matches_A_B_t;
-        aslam::convertMatchesWithScoreToMatches<aslam::FrameToFrameMatchWithScore,
-                                          aslam::FrameToFrameMatch>(
-                                              matches_A_B, &matches_A_B_t);
-//         cv::Mat image_w_feature_matches;
-//         aslam::drawVisualFrameKeyPointsAndMatches(*apple_frame_, *banana_frame_, aslam::FeatureVisualizationType::kHorizontal, matches_A_B_t, &image_w_feature_matches);
-//         
-//         cv::imshow("chamo", image_w_feature_matches);
-//         cv::waitKey(-1);
-        match_list.push_back(matches_A_B);
-    }
-//     
-    aslam::SimpleTrackManager track_manager;
-    for (int i=1;i<frame_list.size();i++){
-        track_manager.applyMatchesToFrames(match_list[i-1], frame_list[i-1].get(), frame_list[i].get());
-        //std::cout<<frame_list[i]->getTrackIds()<<std::endl;
+    //std::vector<aslam::MatchingProblemFrameToFrame::MatchesWithScore> match_list;
+    aslam::FeatureTracks all_tracks;
+    for (int i=0;i<frame_list.size();i++){
+        for (int j=i+1;j<frame_list.size();j++){
+            apple_frame_=frame_list[i];
+            banana_frame_=frame_list[j];
+            Eigen::Matrix4d apple_pose=pose_list[i];
+            Eigen::Matrix4d banana_pose=pose_list[j];
+            Eigen::Matrix4d pose_A_B=apple_pose*banana_pose.inverse();
+            Eigen::Vector3d trans_diff= pose_A_B.block<3,1>(0,3);
+            
+            if (trans_diff.norm()>4){
+                continue;
+            }
+            Eigen::Vector3d rpy = pose_A_B.block<3,3>(0,0).eulerAngles(0,1,2);
+            double total_angle= rpy.norm();
+            if (total_angle>0.5){
+                continue;
+            }
+            Eigen::Matrix4d pose_B_A=pose_A_B.inverse();
+            Eigen::Quaterniond q_e_B_A(pose_B_A.block<3,3>(0,0));
+            aslam::Quaternion q_B_A(q_e_B_A);
+            //std::cout<<q_e_A_B.x()<<","<<q_e_A_B.y()<<","<<q_e_A_B.z()<<","<<q_e_A_B.w()<<std::endl;
+            aslam::MatchingProblemFrameToFrame::Ptr matching_problem =
+                aligned_shared<aslam::MatchingProblemFrameToFrame>(
+                *apple_frame_, *banana_frame_, q_B_A, image_space_distance_threshold_,
+                hamming_distance_threshold_);
+            aslam::MatchingProblemFrameToFrame::MatchesWithScore matches_A_B;
+            matching_engine_.match(matching_problem.get(), &matches_A_B);
+            if (matches_A_B.size()<10){
+                continue;
+            }
+            for (const FrameToFrameMatchWithScore& match : matches_A_B) {
+                int index_apple = match.getKeypointIndexAppleFrame();
+                int index_banana = match.getKeypointIndexBananaFrame();
+                aslam::FeatureTrack* track;
+                int track_ind_apple = findTrack(all_tracks, apple_frame_->getId(), index_apple);
+                int track_ind_banana = findTrack(all_tracks, banana_frame_->getId(), index_banana);
+                if (track_ind_apple!=-1){
+                    if(track_ind_banana!=-1){
+                        for (int bid=0; bid<all_tracks[track_ind_apple].getTrackLength(); bid++){
+                            aslam::KeypointIdentifier kp_info=all_tracks[track_ind_apple].getLastKeypointIdentifier();
+                            all_tracks[track_ind_banana].addKeypointObservationAtBack(kp_info.getNFrameId(),0 ,kp_info.getKeypointIndex());
+                            all_tracks[track_ind_apple].popLastKeypointIdentifier();
+                        }
+                        all_tracks.erase(all_tracks.begin()+track_ind_apple);
+                    }else{
+                        aslam::VisualNFrame::Ptr nframe= aslam::VisualNFrame::createEmptyTestVisualNFrame(cameras_, 0);
+                        nframe->setFrame(0, banana_frame_);
+                        all_tracks[track_ind_apple].addKeypointObservationAtBack(nframe,0 ,index_banana);
+                    }
+                }else if(track_ind_banana!=-1){
+                    aslam::VisualNFrame::Ptr nframe= aslam::VisualNFrame::createEmptyTestVisualNFrame(cameras_, 0);
+                    nframe->setFrame(0, apple_frame_);
+                    all_tracks[track_ind_banana].addKeypointObservationAtBack(nframe,0 ,index_apple);
+                }else{
+                    aslam::FeatureTrack new_track;
+                    aslam::VisualNFrame::Ptr nframe= aslam::VisualNFrame::createEmptyTestVisualNFrame(cameras_, 0);
+                    nframe->setFrame(0, apple_frame_);
+                    new_track.addKeypointObservationAtBack(nframe, 0, index_apple);
+                    nframe= aslam::VisualNFrame::createEmptyTestVisualNFrame(cameras_, 0);
+                    nframe->setFrame(0, banana_frame_);
+                    new_track.addKeypointObservationAtBack(nframe, 0, index_banana);
+                    aslam::KeypointIdentifier kp_infor(nframe, 0, index_banana);
+                    all_tracks.push_back(new_track);
+                }
+            }
+            aslam::SimpleTrackManager track_manager;
+            track_manager.applyMatchesToFrames(matches_A_B, frame_list[i].get(), frame_list[j].get());
+            if (track_manager.merge_list.size()>0){
+                for (int kk=0;kk<frame_list.size();kk++){
+                    if (!frame_list[kk]->hasTrackIds()){
+                        continue;
+                    }
+                    Eigen::VectorXi& track_ids = *frame_list[kk]->getTrackIdsMutable();
+                    for (int kkk=0; kkk<track_ids.rows(); kkk++){
+                        for (int k=0; k<track_manager.merge_list.size(); k++){
+                            if (track_ids(kkk) == track_manager.merge_list[k].first){
+                                track_ids(kkk)=track_manager.merge_list[k].second;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     
-    
-    std::unordered_map<aslam::NFramesId, pose_graph::VertexId> frame_vex_mapper;
-//     
+    std::unordered_map<aslam::NFramesId, pose_graph::VertexId> frame_vex_mapper; 
     aslam::NCamera::Ptr ncamera = aslam::NCamera::createTestNCamera(1);
     std::unordered_map<aslam::NFramesId, Eigen::Matrix4d> nframe_pose_mapping;
-    aslam::FeatureTracksList all_tracks;
-    const size_t kMaxTrackLength = 100;
-    const size_t kMinTrackLength = 3;
-    aslam::FeatureTracks all_tot_tracks;
-    vio_common::FeatureTrackExtractor extractor(cameras_, kMaxTrackLength, kMinTrackLength);
+    std::vector<std::shared_ptr<const aslam::VisualNFrame>> nframe_list;
     pose_graph::VertexId last_ver_id;
     for (int c = 0; c < frame_list.size(); ++c) {
         pose_graph::VertexId vertex_id_;
@@ -223,10 +281,10 @@ int main(int argc, char** argv){
         aslam::VisualNFrame::Ptr nframe= aslam::VisualNFrame::createEmptyTestVisualNFrame(cameras_, c);
         nframe_pose_mapping[nframe->getId()]=pose_list[c];
         nframe->setFrame(0, frame_list[c]);
+        nframe_list.push_back(nframe);
         vi_map::Vertex* map_vertex = new vi_map::Vertex(vertex_id_, nframe, mission_id_);
         Eigen::Matrix4d pose= pose_list[c];
         Eigen::Matrix3d rot=pose.block<3,3>(0,0);
-        //std::cout<<std::fabs(pose.determinant() - static_cast<double>(1.0))<<std::endl;
         aslam::Transformation T_G_B(pose.block<3,1>(0,3), kindr::minimal::RotationQuaternion(rot));
         map_vertex->set_T_M_I(T_G_B);
         map->addVertex(vi_map::Vertex::UniquePtr(map_vertex));
@@ -242,46 +300,36 @@ int main(int argc, char** argv){
         }
         last_ver_id=vertex_id_;
         frame_vex_mapper[nframe->getId()]=vertex_id_;
-        int num_tracks = extractor.extractFromNFrameStream(nframe, &all_tracks);
-        if (num_tracks>0){
-            all_tot_tracks.insert(all_tot_tracks.end(),all_tracks[0].begin(), all_tracks[0].end());
+    } 
 
-//             cv::Mat img;
-//             for (int track_i=0; track_i<all_tracks[0].size(); track_i++){
-//                 aslam::FeatureTrack track=all_tracks[0][track_i];
-//                 Eigen::Vector2d last_pt;
-//                 if (track_i==0){
-//                     aslam::KeypointIdentifier track_item = track.getKeypointIdentifiers().back();
-//                     img= track_item.getFrame().getRawImage();
-//                     cv::cvtColor(img,img, CV_GRAY2BGRA);
-//                 }
-//                 //std::cout<<track.getKeypointIdentifiers().back().getNFrameId()<<std::endl;
-//                 for (size_t j = 0; j < track.getKeypointIdentifiers().size(); ++j) {
-//                     if (j==0){
-//                         aslam::KeypointIdentifier track_item = track.getKeypointIdentifiers()[0];
-//                         last_pt=track_item.getKeypointMeasurement();
-//                         //std::cout<<cv::Point2i(last_pt[0], last_pt[1])<<std::endl;
-//                         cv::circle(img, cv::Point2i(last_pt[0], last_pt[1]), 2, cv::Scalar(0,0,255,255),2);
-//                         continue;
-//                     }
-//                     
-//                     aslam::KeypointIdentifier track_item = track.getKeypointIdentifiers()[j];
-//                     Eigen::Vector2d pt= track_item.getKeypointMeasurement();
-//                     cv::line(img, cv::Point2i(last_pt[0], last_pt[1]), cv::Point2i(pt[0], pt[1]), cv::Scalar(255,0,0,255),1);
-//                     //std::cout<<cv::Point2i(pt[0], pt[1])<<std::endl;
-//                     last_pt=pt;
-//                 }
-//             }
-//             cv::imshow("chamo", img);
-//             cv::waitKey(-1);
+    const size_t kMaxTrackLength = 100;
+    const size_t kMinTrackLength = 5;
+    aslam::FeatureTracksList all_tracks;
+    
+    vio_common::FeatureTrackExtractor extractor(cameras_, kMaxTrackLength, kMinTrackLength);
+    int num_tracks = extractor.extractBatch(nframe_list, &all_tracks);
+    
+    for (int i=0; i<all_tracks[0].size(); i++){
+        aslam::FeatureTrack track=all_tracks[0][i];
+        std::cout<<track.getKeypointIdentifiers().size()<<std::endl;
+        for (size_t j = 0; j < track.getKeypointIdentifiers().size(); ++j) {
+            aslam::KeypointIdentifier track_item = track.getKeypointIdentifiers()[j];
+            cv::Mat img= track_item.getFrame().getRawImage();
+            cv::cvtColor(img,img, CV_GRAY2BGRA);
+            Eigen::Vector2d last_pt;
+            last_pt=track_item.getKeypointMeasurement();
+            cv::circle(img, cv::Point2i(last_pt[0], last_pt[1]), 2, cv::Scalar(0,0,255,255),2);
+            cv::imshow("chamo", img);
+            cv::waitKey(-1);
         }
-    }  
+    }
+
 //     
     std::map<size_t, Eigen::Vector3d> track_posi;
     aslam::Transformation T_B_C(Eigen::Vector3d(0,0,0), kindr::minimal::RotationQuaternion(Eigen::Vector3d(0,0,0)));
     
-    for(int i=0; i<all_tot_tracks.size();i++){
-        aslam::FeatureTrack track=all_tot_tracks[i];
+    for(int i=0; i<all_tracks[0].size();i++){
+        aslam::FeatureTrack track=all_tracks[0][i];
         Aligned<std::vector, Eigen::Vector2d> measurements;
         Aligned<std::vector, aslam::Transformation> T_G_Bs;
         Eigen::Vector3d G_point;
@@ -308,14 +356,14 @@ int main(int argc, char** argv){
                 firstkp=kp_list_vi[0];
             }
         }
-        std::cout<<"==================="<<std::endl;
+        //std::cout<<"==================="<<std::endl;
         
         //aslam::TriangulationResult re =aslam::triangulateFeatureTrack(track, T_G_Bs, &G_point);
         aslam::TriangulationResult re =aslam::iterativeGaussNewtonTriangulateFromNViews(measurements, T_G_Bs, T_B_C, &G_point);
         if (re.wasTriangulationSuccessful()){
             bool is_visible_all=true;
             const aslam::Camera::ConstPtr& camera = track.getFirstKeypointIdentifier().getCamera();
-            std::cout<<"count: "<<track.getKeypointIdentifiers().size()<<std::endl;
+            //std::cout<<"count: "<<track.getKeypointIdentifiers().size()<<std::endl;
             float err_t=0;
             for (size_t j = 0; j < track.getKeypointIdentifiers().size(); ++j){
                 aslam::KeypointIdentifier track_item = track.getKeypointIdentifiers()[j];
@@ -325,13 +373,13 @@ int main(int argc, char** argv){
                 aslam::ProjectionResult re_proj= camera->project3(I_p_fi, &out_keypoint);
                 float err = (out_keypoint-track_item.getKeypointMeasurement()).norm();
                 err_t=err_t+err;
-                std::cout<<I_p_fi[2]<<std::endl;
+                //std::cout<<I_p_fi[2]<<std::endl;
                 if (!re_proj.isKeypointVisible() || err>10 || I_p_fi[2]>20){
                     is_visible_all=false;
                     break;
                 }
             }
-            std::cout<<err_t/(float)track.getKeypointIdentifiers().size()<<std::endl;
+            //std::cout<<err_t/(float)track.getKeypointIdentifiers().size()<<std::endl;
             //is_visible_all=true;
             if(is_visible_all){
                 vi_map::LandmarkId lm_id_;
